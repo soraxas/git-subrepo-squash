@@ -299,20 +299,24 @@ def color(text: str, code: str, enable: bool) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
-def format_subrepo_summary(entry: SubrepoStatus, colorize: bool) -> str:
+def format_subrepo_summary(
+    entry: SubrepoStatus,
+    colorize: bool,
+    missing_parents: set[str],
+) -> str:
     details: list[str] = []
     if entry.commit:
-        details.append(f"commit {entry.commit}")
+        details.append(color(f"commit {entry.commit}", "33", colorize))
     if entry.parent:
-        details.append(f"parent {entry.parent}")
+        parent_color = "1;31" if entry.parent in missing_parents else "36"
+        details.append(color(f"parent {entry.parent}", parent_color, colorize))
     if entry.branch:
-        details.append(f"branch {entry.branch}")
+        details.append(color(f"branch {entry.branch}", "35", colorize))
     if entry.remote:
-        details.append(f"remote {entry.remote}")
+        details.append(color(f"remote {entry.remote}", "90", colorize))
     if not details:
         return ""
-    summary = " (" + ", ".join(details) + ")"
-    return color(summary, "33", colorize)
+    return " (" + ", ".join(details) + ")"
 
 
 def strip_ansi(text: str) -> str:
@@ -397,10 +401,12 @@ def render_tree(
     node: TreeNode,
     prefix: str = "",
     path_parts: tuple[str, ...] = (),
+    missing_parents: set[str] | None = None,
 ) -> list[str]:
     lines: list[str] = []
     items = sorted(node.children.items(), key=lambda item: item[0])
     colorize = use_color()
+    missing = missing_parents or set()
     for index, (name, child) in enumerate(items):
         is_last = index == len(items) - 1
         branch = "`-- " if is_last else "|-- "
@@ -411,7 +417,7 @@ def render_tree(
         line = f"{prefix}{branch}{display_name}"
         current_parts = path_parts + (name,)
         if child.subrepo:
-            line += format_subrepo_summary(child.subrepo, colorize)
+            line += format_subrepo_summary(child.subrepo, colorize, missing)
         lines.append(line)
 
         next_prefix = prefix + ("    " if is_last else "|   ")
@@ -420,6 +426,7 @@ def render_tree(
                 child,
                 prefix=next_prefix,
                 path_parts=current_parts,
+                missing_parents=missing,
             )
         )
     return lines
@@ -441,16 +448,12 @@ def run_status(args: argparse.Namespace) -> int:
             parent_map.setdefault(entry.parent, []).append(entry.path.as_posix())
 
     lines: list[str] = []
-    lines.append("Subrepos:")
-    tree = build_subrepo_tree(entries)
-    lines.extend(render_tree(tree))
+    warning_line: str | None = None
+    log_lines: list[str] = []
+    missing: set[str] = set()
 
     if parent_map and args.log_count > 0:
         log_lines, missing = gather_repo_history(repo_root, parent_map, args.log_count)
-        if log_lines:
-            lines.append("")
-            lines.append("History (until all pull parents are found):")
-            lines.extend(log_lines)
         if missing:
             colorize = use_color()
             details: list[str] = []
@@ -464,8 +467,20 @@ def run_status(args: argparse.Namespace) -> int:
                 "WARNING: pull parents not found in git history (within log limit): "
                 + "; ".join(details)
             )
-            lines.append("")
-            lines.append(color(warning, "7;31", colorize))
+            warning_line = color(warning, "7;31", colorize)
+
+    if warning_line:
+        lines.append(warning_line)
+        lines.append("")
+
+    lines.append("Subrepos:")
+    tree = build_subrepo_tree(entries)
+    lines.extend(render_tree(tree, missing_parents=missing))
+
+    if log_lines:
+        lines.append("")
+        lines.append("History (until all pull parents are found):")
+        lines.extend(log_lines)
 
     output_text = "\n".join(lines) + "\n"
     use_pager = sys.stdout.isatty()
