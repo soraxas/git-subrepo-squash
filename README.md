@@ -22,6 +22,7 @@ git-subrepo-squash squash path/to/subrepo \
   --head HEAD \
   --output /tmp/subrepo.patch \
   --stat
+git-subrepo-squash squash-commit path/to/subrepo <target-sha>
 ```
 
 Arguments:
@@ -41,6 +42,10 @@ stops once all pull parents are shown and tags commits that match a pull parent.
 ANSI color is enabled when output is a TTY (or when `NO_COLOR` is unset).
 Output uses your configured pager (`$PAGER`, defaults to `less -FRSX`) when stdout is a TTY.
 Use `--no-pager` to disable it or `--pager` to force it.
+
+`squash-commit` rewrites the subrepo `.gitrepo` parent to an earlier commit after
+verifying that no non-`.gitrepo` changes occurred under the subrepo path between
+the target commit and the current parent.
 
 When no changes are found for the selected subrepo path, the command exits
 successfully and prints a notice to stderr (unless `--quiet` is used).

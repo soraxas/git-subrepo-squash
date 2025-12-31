@@ -111,6 +111,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the pager even when output is a TTY.",
     )
+
+    squash_commit = subparsers.add_parser(
+        "squash-commit",
+        help="Rewrite a subrepo .gitrepo parent to an earlier commit after validation.",
+    )
+    squash_commit.add_argument(
+        "path",
+        type=Path,
+        help="Path to the subrepo directory (relative to the repository root).",
+    )
+    squash_commit.add_argument(
+        "target",
+        help="Target commit SHA (must be an ancestor of the current subrepo parent).",
+    )
+    squash_commit.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Permit running with uncommitted changes in the working tree.",
+    )
     return parser
 
 
@@ -184,6 +203,74 @@ def page_output(text: str) -> None:
             proc.wait()
     except (OSError, ValueError):
         print(text, end="")
+
+
+def is_ancestor(repo_root: Path, older: str, newer: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", older, newer],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    stderr = result.stderr.strip() or "unknown git error"
+    raise SquashError(f"git merge-base --is-ancestor failed: {stderr}")
+
+
+def rev_parse(repo_root: Path, ref: str) -> str:
+    output = run_git(repo_root, ["rev-parse", ref])
+    return output.strip()
+
+
+def parse_gitrepo_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        raise SquashError(f"Missing .gitrepo file at {path}")
+    lines = path.read_text().splitlines()
+    values: dict[str, str] = {}
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = stripped.lower() == "[subrepo]"
+            continue
+        if not in_section:
+            continue
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip().lower()] = value.strip()
+    return values
+
+
+def update_gitrepo_parent(path: Path, new_parent: str) -> None:
+    lines = path.read_text().splitlines()
+    updated: list[str] = []
+    in_section = False
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = stripped.lower() == "[subrepo]"
+            updated.append(line)
+            continue
+        if in_section:
+            match = re.match(r"^(\s*parent\s*)=(.*)$", line)
+            if match:
+                updated.append(f"{match.group(1)}= {new_parent}")
+                replaced = True
+            else:
+                updated.append(line)
+            continue
+        updated.append(line)
+    if not replaced:
+        raise SquashError(f"Could not find parent entry in {path}")
+    path.write_text("\n".join(updated) + "\n")
 
 
 _SUBREPO_HEADER_QUOTED = re.compile(
@@ -496,6 +583,58 @@ def run_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_squash_commit(args: argparse.Namespace) -> int:
+    repo = find_repo(args.repo)
+    ensure_clean(repo, allow_dirty=args.allow_dirty)
+    repo_root = Path(repo.working_tree_dir).resolve()
+
+    target_path = resolve_subrepo_path(repo, args.path)
+    rel_path = target_path.relative_to(repo_root)
+    gitrepo_path = target_path / ".gitrepo"
+    values = parse_gitrepo_file(gitrepo_path)
+    current_parent = values.get("parent")
+    if not current_parent:
+        raise SquashError(f"No parent entry found in {gitrepo_path}")
+
+    target_full = rev_parse(repo_root, args.target)
+    current_parent_full = rev_parse(repo_root, current_parent)
+
+    if target_full == current_parent_full:
+        print(f"Parent is already {current_parent_full} for {rel_path}.")
+        return 0
+
+    if not is_ancestor(repo_root, target_full, current_parent_full):
+        raise SquashError(
+            f"Target {target_full} is not an ancestor of current parent {current_parent_full}."
+        )
+
+    diff_output = run_git(
+        repo_root,
+        [
+            "diff",
+            "--name-only",
+            f"{target_full}..{current_parent_full}",
+            "--",
+            rel_path.as_posix(),
+        ],
+    )
+    changed_files = [line.strip() for line in diff_output.splitlines() if line.strip()]
+    gitrepo_rel = (rel_path / ".gitrepo").as_posix()
+    non_gitrepo_changes = [
+        path for path in changed_files if path != gitrepo_rel
+    ]
+    if non_gitrepo_changes:
+        raise SquashError(
+            "Refusing to squash past modified history. "
+            f"Found changes under {rel_path} between {args.target}..{current_parent} "
+            f"outside {gitrepo_rel}:\n{'\n'.join(map(lambda path: f" - {path}", non_gitrepo_changes))}"
+        )
+
+    update_gitrepo_parent(gitrepo_path, target_full)
+    print(f"Updated {gitrepo_path} parent to {target_full}.")
+    return 0
+
+
 def run_squash(args: argparse.Namespace) -> int:
     repo = find_repo(args.repo)
     ensure_clean(repo, allow_dirty=args.allow_dirty)
@@ -540,10 +679,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command is None:
             args.command = "status"
+            if not hasattr(args, "log_count"):
+                args.log_count = 200
+            if not hasattr(args, "pager"):
+                args.pager = False
+            if not hasattr(args, "no_pager"):
+                args.no_pager = False
         if args.command == "squash":
             return run_squash(args)
         if args.command == "status":
             return run_status(args)
+        if args.command == "squash-commit":
+            return run_squash_commit(args)
         parser.error(f"Unknown command: {args.command!r}")
     except SquashError as exc:
         parser.exit(status=1, message=f"error: {exc}\n")
