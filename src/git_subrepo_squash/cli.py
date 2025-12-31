@@ -104,7 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument(
         "--pager",
         action="store_true",
-        help="Pipe the output through a pager (uses the PAGER environment variable).",
+        help="Force pager output (uses the PAGER environment variable).",
+    )
+    status.add_argument(
+        "--no-pager",
+        action="store_true",
+        help="Disable the pager even when output is a TTY.",
     )
     return parser
 
@@ -463,7 +468,12 @@ def run_status(args: argparse.Namespace) -> int:
             lines.append(color(warning, "7;31", colorize))
 
     output_text = "\n".join(lines) + "\n"
-    if args.pager and sys.stdout.isatty():
+    use_pager = sys.stdout.isatty()
+    if args.no_pager:
+        use_pager = False
+    if args.pager:
+        use_pager = True
+    if use_pager:
         page_output(output_text)
     else:
         print(output_text, end="")

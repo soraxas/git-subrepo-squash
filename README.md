@@ -16,7 +16,7 @@ pip install -e .
 
 ```
 git-subrepo-squash
-git-subrepo-squash status --log-count 200 --pager
+git-subrepo-squash status --log-count 200
 git-subrepo-squash squash path/to/subrepo \
   --base origin/main \
   --head HEAD \
@@ -39,7 +39,8 @@ tree of subrepo paths discovered via `git subrepo status`, along with recent
 commit history DAG for the main repo (controlled by `--log-count`). The history
 stops once all pull parents are shown and tags commits that match a pull parent.
 ANSI color is enabled when output is a TTY (or when `NO_COLOR` is unset).
-Use `--pager` to route the output through your configured pager (`$PAGER`, defaults to `less -FRSX`).
+Output uses your configured pager (`$PAGER`, defaults to `less -FRSX`) when stdout is a TTY.
+Use `--no-pager` to disable it or `--pager` to force it.
 
 When no changes are found for the selected subrepo path, the command exits
 successfully and prints a notice to stderr (unless `--quiet` is used).
