@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
+import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +25,15 @@ class DiffResult:
     head: str
 
 
+@dataclass(frozen=True)
+class SubrepoStatus:
+    path: Path
+    remote: str | None = None
+    branch: str | None = None
+    commit: str | None = None
+    parent: str | None = None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="git-subrepo-squash",
@@ -33,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path inside the repository. Defaults to the current working directory.",
     )
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     squash = subparsers.add_parser(
         "squash",
@@ -74,6 +87,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Silence informational messages (patch output is never suppressed).",
     )
+
+    status = subparsers.add_parser(
+        "status",
+        help="Show subrepo paths and recent history as a tree.",
+    )
+    status.add_argument(
+        "--log-count",
+        type=int,
+        default=200,
+        help=(
+            "Maximum number of commits to show in the history DAG (default: 200). "
+            "Output stops early once all pull parents are found."
+        ),
+    )
+    status.add_argument(
+        "--pager",
+        action="store_true",
+        help="Pipe the output through a pager (uses the PAGER environment variable).",
+    )
     return parser
 
 
@@ -112,6 +144,331 @@ def collect_diff(repo: Repo, rel_path: Path, base: str, head: str) -> DiffResult
     except GitCommandError as exc:
         raise SquashError(f"git diff failed: {exc}") from exc
     return DiffResult(patch=patch, stat=stat, rel_path=rel_path, base=base, head=head)
+
+
+def run_git(repo_root: Path, args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "unknown git error"
+        raise SquashError(f"git {' '.join(args)} failed: {stderr}")
+    return result.stdout
+
+
+def page_output(text: str) -> None:
+    pager_cmd = os.environ.get("PAGER") or "less -FRSX"
+    try:
+        pager_args = shlex.split(pager_cmd)
+        env = os.environ.copy()
+        if pager_args and pager_args[0].endswith("less"):
+            env.setdefault("LESS", "-FRSX")
+        with subprocess.Popen(
+            pager_args,
+            stdin=subprocess.PIPE,
+            text=True,
+            env=env,
+        ) as proc:
+            if proc.stdin:
+                proc.stdin.write(text)
+                proc.stdin.close()
+            proc.wait()
+    except (OSError, ValueError):
+        print(text, end="")
+
+
+_SUBREPO_HEADER_QUOTED = re.compile(
+    r"^(?:git\s+)?subrepo(?:\s+path)?\s+'([^']+)'\s*:",
+    re.IGNORECASE,
+)
+_SUBREPO_HEADER_UNQUOTED = re.compile(
+    r"^(?:git\s+)?subrepo(?:\s+path)?\s+([^:]+)\s*:",
+    re.IGNORECASE,
+)
+_SUBREPO_KV = re.compile(r"^\s*([A-Za-z ]+?)\s*:\s*(.+)$")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def parse_subrepo_status(output: str) -> list[SubrepoStatus]:
+    if "No subrepos." in output:
+        return []
+
+    entries: list[SubrepoStatus] = []
+    current: SubrepoStatus | None = None
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().endswith("subrepos:"):
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith(("git subrepo", "subrepo")):
+            if lowered.startswith("subrepo branch"):
+                continue
+            header_match = _SUBREPO_HEADER_QUOTED.match(stripped)
+            if not header_match:
+                header_match = _SUBREPO_HEADER_UNQUOTED.match(stripped)
+            if header_match:
+                name = header_match.group(1).strip()
+                if name.lower() == "branch":
+                    continue
+                if current:
+                    entries.append(current)
+                current = SubrepoStatus(path=Path(name))
+                continue
+
+        if not current:
+            continue
+
+        kv_match = _SUBREPO_KV.match(line)
+        if not kv_match:
+            continue
+
+        key = kv_match.group(1).strip().lower()
+        value = kv_match.group(2).strip()
+        if key in {"remote", "remote url"}:
+            current = SubrepoStatus(
+                path=current.path,
+                remote=value,
+                branch=current.branch,
+                commit=current.commit,
+                parent=current.parent,
+            )
+        elif key in {"branch", "tracking branch"}:
+            current = SubrepoStatus(
+                path=current.path,
+                remote=current.remote,
+                branch=value,
+                commit=current.commit,
+                parent=current.parent,
+            )
+        elif key in {"commit", "pulled commit", "upstream ref"}:
+            current = SubrepoStatus(
+                path=current.path,
+                remote=current.remote,
+                branch=current.branch,
+                commit=value,
+                parent=current.parent,
+            )
+        elif key in {"parent", "pull parent"}:
+            current = SubrepoStatus(
+                path=current.path,
+                remote=current.remote,
+                branch=current.branch,
+                commit=current.commit,
+                parent=value,
+            )
+
+    if current:
+        entries.append(current)
+
+    return entries
+
+
+class TreeNode:
+    def __init__(self) -> None:
+        self.children: dict[str, TreeNode] = {}
+        self.subrepo: SubrepoStatus | None = None
+
+
+def build_subrepo_tree(entries: list[SubrepoStatus]) -> TreeNode:
+    root = TreeNode()
+    for entry in entries:
+        node = root
+        for part in entry.path.parts:
+            node = node.children.setdefault(part, TreeNode())
+        node.subrepo = entry
+    return root
+
+
+def use_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def color(text: str, code: str, enable: bool) -> str:
+    if not enable:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def format_subrepo_summary(entry: SubrepoStatus, colorize: bool) -> str:
+    details: list[str] = []
+    if entry.commit:
+        details.append(f"commit {entry.commit}")
+    if entry.parent:
+        details.append(f"parent {entry.parent}")
+    if entry.branch:
+        details.append(f"branch {entry.branch}")
+    if entry.remote:
+        details.append(f"remote {entry.remote}")
+    if not details:
+        return ""
+    summary = " (" + ", ".join(details) + ")"
+    return color(summary, "33", colorize)
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def extract_sha(log_line: str) -> str | None:
+    plain = strip_ansi(log_line)
+    match = re.search(r"\b[0-9a-f]{7,40}\b", plain)
+    if not match:
+        return None
+    return match.group(0)
+
+
+def count_commits_until_parents(
+    repo_root: Path,
+    parents: set[str],
+    max_count: int,
+) -> tuple[int, set[str]]:
+    if not parents:
+        return 0, set()
+    args = ["log", "--pretty=%h"]
+    if max_count > 0:
+        args.append(f"--max-count={max_count}")
+    output = run_git(repo_root, args)
+    remaining = set(parents)
+    count = 0
+    for line in output.splitlines():
+        sha = line.strip()
+        if not sha:
+            continue
+        count += 1
+        for parent in list(remaining):
+            if sha.startswith(parent) or parent.startswith(sha):
+                remaining.discard(parent)
+        if not remaining:
+            break
+    return count, remaining
+
+
+def gather_repo_history(
+    repo_root: Path,
+    parent_map: dict[str, list[str]],
+    max_count: int,
+) -> tuple[list[str], set[str]]:
+    parents = set(parent_map)
+    count, remaining = count_commits_until_parents(repo_root, parents, max_count)
+    if count <= 0:
+        return [], remaining
+
+    output = run_git(
+        repo_root,
+        [
+            "log",
+            "--graph",
+            "--oneline",
+            "--decorate",
+            "--color=always",
+            f"--max-count={count}",
+        ],
+    )
+    colorize = use_color()
+    lines: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        sha = extract_sha(line)
+        if sha:
+            tags: list[str] = []
+            for parent, names in parent_map.items():
+                if sha.startswith(parent) or parent.startswith(sha):
+                    for name in names:
+                        tags.append(f"[parent {name}]")
+            if tags:
+                suffix = " " + " ".join(tags)
+                line = f"{line}{color(suffix, '7;36', colorize)}"
+        lines.append(line.rstrip())
+    return lines, remaining
+
+
+def render_tree(
+    node: TreeNode,
+    prefix: str = "",
+    path_parts: tuple[str, ...] = (),
+) -> list[str]:
+    lines: list[str] = []
+    items = sorted(node.children.items(), key=lambda item: item[0])
+    colorize = use_color()
+    for index, (name, child) in enumerate(items):
+        is_last = index == len(items) - 1
+        branch = "`-- " if is_last else "|-- "
+        if child.subrepo:
+            display_name = color(name, "1;36", colorize)
+        else:
+            display_name = color(name, "32", colorize)
+        line = f"{prefix}{branch}{display_name}"
+        current_parts = path_parts + (name,)
+        if child.subrepo:
+            line += format_subrepo_summary(child.subrepo, colorize)
+        lines.append(line)
+
+        next_prefix = prefix + ("    " if is_last else "|   ")
+        lines.extend(
+            render_tree(
+                child,
+                prefix=next_prefix,
+                path_parts=current_parts,
+            )
+        )
+    return lines
+
+
+def run_status(args: argparse.Namespace) -> int:
+    repo = find_repo(args.repo)
+    repo_root = Path(repo.working_tree_dir).resolve()
+    output = run_git(repo_root, ["subrepo", "status"])
+    entries = parse_subrepo_status(output)
+
+    if not entries:
+        print("No subrepos detected.")
+        return 0
+
+    parent_map: dict[str, list[str]] = {}
+    for entry in entries:
+        if entry.parent:
+            parent_map.setdefault(entry.parent, []).append(entry.path.as_posix())
+
+    lines: list[str] = []
+    lines.append("Subrepos:")
+    tree = build_subrepo_tree(entries)
+    lines.extend(render_tree(tree))
+
+    if parent_map and args.log_count > 0:
+        log_lines, missing = gather_repo_history(repo_root, parent_map, args.log_count)
+        if log_lines:
+            lines.append("")
+            lines.append("History (until all pull parents are found):")
+            lines.extend(log_lines)
+        if missing:
+            colorize = use_color()
+            details: list[str] = []
+            for parent in sorted(missing):
+                paths = ", ".join(sorted(parent_map.get(parent, [])))
+                if paths:
+                    details.append(f"{parent} ({paths})")
+                else:
+                    details.append(parent)
+            warning = (
+                "WARNING: pull parents not found in git history (within log limit): "
+                + "; ".join(details)
+            )
+            lines.append("")
+            lines.append(color(warning, "7;31", colorize))
+
+    output_text = "\n".join(lines) + "\n"
+    if args.pager and sys.stdout.isatty():
+        page_output(output_text)
+    else:
+        print(output_text, end="")
+
+    return 0
 
 
 def run_squash(args: argparse.Namespace) -> int:
@@ -156,8 +513,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command is None:
+            args.command = "status"
         if args.command == "squash":
             return run_squash(args)
+        if args.command == "status":
+            return run_status(args)
         parser.error(f"Unknown command: {args.command!r}")
     except SquashError as exc:
         parser.exit(status=1, message=f"error: {exc}\n")
