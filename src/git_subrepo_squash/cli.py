@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -112,6 +112,7 @@ def ensure_clean(repo: Repo, allow_dirty: bool) -> None:
 
 
 def resolve_subrepo_path(repo: Repo, subrepo_path: Path) -> Path:
+    assert repo.working_tree_dir is not None
     root = Path(repo.working_tree_dir).resolve()
     target = (root / subrepo_path).resolve()
     try:
@@ -441,7 +442,7 @@ def gather_repo_history(
                         tags.append(f"[{name}]")
                         # tags.append(f"[parent {name}]")
             if tags:
-                suffix = " " + " ".join((color(t, '7;36', colorize) for t in tags))
+                suffix = " " + " ".join((color(t, "7;36", colorize) for t in tags))
                 line = f"{line}{suffix}"
         lines.append(line.rstrip())
     return lines, remaining
@@ -484,6 +485,7 @@ def render_tree(
 
 def run_status(args: argparse.Namespace) -> int:
     repo = find_repo(args.repo)
+    assert repo.working_tree_dir is not None
     repo_root = Path(repo.working_tree_dir).resolve()
     output = run_git(repo_root, ["subrepo", "status"])
     entries = parse_subrepo_status(output)
@@ -549,6 +551,7 @@ def run_status(args: argparse.Namespace) -> int:
 def run_squash_commit(args: argparse.Namespace) -> int:
     repo = find_repo(args.repo)
     ensure_clean(repo, allow_dirty=args.allow_dirty)
+    assert repo.working_tree_dir is not None
     repo_root = Path(repo.working_tree_dir).resolve()
 
     target_full = rev_parse(repo_root, args.target)
@@ -585,7 +588,9 @@ def run_squash_commit(args: argparse.Namespace) -> int:
                 rel_path.as_posix(),
             ],
         )
-        changed_files = [line.strip() for line in diff_output.splitlines() if line.strip()]
+        changed_files = [
+            line.strip() for line in diff_output.splitlines() if line.strip()
+        ]
         gitrepo_rel = (rel_path / ".gitrepo").as_posix()
         non_gitrepo_changes = [
             file_path for file_path in changed_files if file_path != gitrepo_rel

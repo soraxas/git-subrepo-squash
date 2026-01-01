@@ -26,6 +26,7 @@ git-subrepo-squash squash-commit path/to/subrepo [path/to/other] --target <targe
 ```
 
 Arguments:
+
 - `path` – directory of the vendored subrepo relative to the repo root.
 - `--base` – reference to diff against (default: `origin/main`).
 - `--head` – reference containing your changes (default: `HEAD`).
