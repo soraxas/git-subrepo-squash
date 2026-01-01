@@ -1,8 +1,7 @@
 ## git-subrepo-squash
 
-Generate a single patch containing all changes made to a vendored `git subrepo`
-directory so you can send them upstream without rewriting your main repository's
-history.
+Inspect git-subrepo metadata and safely move the recorded parent commit for a
+vendored subrepo.
 
 ### Install
 
@@ -15,34 +14,29 @@ uv tool install .
 ```
 git-subrepo-squash
 git-subrepo-squash status --log-count 200
-git-subrepo-squash squash path/to/subrepo \
-  --base origin/main \
-  --head HEAD \
-  --output /tmp/subrepo.patch \
-  --stat
-git-subrepo-squash squash-commit path/to/subrepo [path/to/other] --target <target-sha>
+git-subrepo-squash squash path/to/subrepo [path/to/other] --target <target-sha>
 ```
 
 Arguments:
 
-- `path` – directory of the vendored subrepo relative to the repo root.
-- `--base` – reference to diff against (default: `origin/main`).
-- `--head` – reference containing your changes (default: `HEAD`).
-- `--output` – optional patch file path. If omitted, the patch prints to stdout.
-- `--stat` – show a diffstat after generating the patch.
+- `paths` – one or more subrepo directories relative to the repo root.
+- `--target` – target commit SHA to move the subrepo parent to.
 - `--allow-dirty` – skip the clean working tree check.
 - `--repo` – path anywhere inside the repository (defaults to `.`).
-- `--quiet` – hide informational messages.
+- `--log-count` – maximum number of commits to show in the history DAG (default: 200).
+- `--pager` – force pager output (uses `$PAGER`).
+- `--no-pager` – disable the pager even when output is a TTY.
 
 Running `git-subrepo-squash` (or `git-subrepo-squash status`) prints an ASCII
-tree of subrepo paths discovered via `git subrepo status`, along with recent
-commit history DAG for the main repo (controlled by `--log-count`). The history
-stops once all pull parents are shown and tags commits that match a pull parent.
-ANSI color is enabled when output is a TTY (or when `NO_COLOR` is unset).
-Output uses your configured pager (`$PAGER`, defaults to `less -FRSX`) when stdout is a TTY.
-Use `--no-pager` to disable it or `--pager` to force it.
+tree of subrepo paths discovered via `git subrepo status`, along with each
+subrepo's recorded head commit and a recent commit history DAG for the main repo
+(controlled by `--log-count`). The history stops once all pull parents are shown
+and tags commits that match a pull parent. ANSI color is enabled when output is
+a TTY (or when `NO_COLOR` is unset). Output uses your configured pager
+(`$PAGER`, defaults to `less -FRSX`) when stdout is a TTY. Use `--no-pager` to
+disable it or `--pager` to force it.
 
-`squash-commit` rewrites the subrepo `.gitrepo` parent to an earlier commit after
+`squash` rewrites the subrepo `.gitrepo` parent to an earlier commit after
 verifying that no non-`.gitrepo` changes occurred under the subrepo path between
 the target commit and the current parent. Multiple subrepo paths may be supplied.
 
