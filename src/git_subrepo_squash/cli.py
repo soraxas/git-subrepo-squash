@@ -48,46 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    squash = subparsers.add_parser(
-        "squash",
-        help="Collect all changes for a subrepo path between two refs into one patch.",
-    )
-    squash.add_argument(
-        "path",
-        type=Path,
-        help="Path to the subrepo directory (relative to the repository root).",
-    )
-    squash.add_argument(
-        "--base",
-        default="origin/main",
-        help="Base ref to diff against. Defaults to origin/main.",
-    )
-    squash.add_argument(
-        "--head",
-        default="HEAD",
-        help="Ref containing your local changes. Defaults to HEAD.",
-    )
-    squash.add_argument(
-        "--output",
-        type=Path,
-        help="Optional file to write the patch to. Prints to stdout when omitted.",
-    )
-    squash.add_argument(
-        "--stat",
-        action="store_true",
-        help="Also print a diffstat after generating the patch.",
-    )
-    squash.add_argument(
-        "--allow-dirty",
-        action="store_true",
-        help="Permit running with uncommitted changes in the working tree.",
-    )
-    squash.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Silence informational messages (patch output is never suppressed).",
-    )
-
     status = subparsers.add_parser(
         "status",
         help="Show subrepo paths and recent history as a tree.",
@@ -113,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     squash_commit = subparsers.add_parser(
-        "squash-commit",
+        "squash",
         help="Rewrite a subrepo .gitrepo parent to an earlier commit after validation.",
     )
     squash_commit.add_argument(
@@ -647,43 +607,6 @@ def run_squash_commit(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_squash(args: argparse.Namespace) -> int:
-    repo = find_repo(args.repo)
-    ensure_clean(repo, allow_dirty=args.allow_dirty)
-
-    target = resolve_subrepo_path(repo, args.path)
-    rel_path = target.relative_to(Path(repo.working_tree_dir).resolve())
-
-    diff = collect_diff(repo, rel_path, base=args.base, head=args.head)
-
-    if not diff.patch.strip():
-        if not args.quiet:
-            print(
-                f"No changes detected in {rel_path} between {args.base}..{args.head}.",
-                file=sys.stderr,
-            )
-        return 0
-
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        content = diff.patch
-        if content and not content.endswith("\n"):
-            content += "\n"
-        args.output.write_text(content)
-        if not args.quiet:
-            print(f"Wrote patch for {rel_path} to {args.output}")
-    else:
-        sys.stdout.write(diff.patch)
-        if diff.patch and not diff.patch.endswith("\n"):
-            sys.stdout.write("\n")
-
-    if args.stat:
-        print("\nDiffstat:")
-        print(diff.stat or " (no file-level changes detected)")
-
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -697,11 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.pager = False
             if not hasattr(args, "no_pager"):
                 args.no_pager = False
-        if args.command == "squash":
-            return run_squash(args)
         if args.command == "status":
             return run_status(args)
-        if args.command == "squash-commit":
+        if args.command == "squash":
             return run_squash_commit(args)
         parser.error(f"Unknown command: {args.command!r}")
     except SquashError as exc:
