@@ -7,9 +7,7 @@ history.
 ### Install
 
 ```bash
-pip install .
-# or for development
-pip install -e .
+uv tool install .
 ```
 
 ### Usage
