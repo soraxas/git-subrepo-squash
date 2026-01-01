@@ -117,12 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rewrite a subrepo .gitrepo parent to an earlier commit after validation.",
     )
     squash_commit.add_argument(
-        "path",
+        "paths",
         type=Path,
-        help="Path to the subrepo directory (relative to the repository root).",
+        nargs="+",
+        help="One or more subrepo directories (relative to the repository root).",
     )
     squash_commit.add_argument(
-        "target",
+        "--target",
+        required=True,
         help="Target commit SHA (must be an ancestor of the current subrepo parent).",
     )
     squash_commit.add_argument(
@@ -476,10 +478,11 @@ def gather_repo_history(
             for parent, names in parent_map.items():
                 if sha.startswith(parent) or parent.startswith(sha):
                     for name in names:
-                        tags.append(f"[parent {name}]")
+                        tags.append(f"[{name}]")
+                        # tags.append(f"[parent {name}]")
             if tags:
-                suffix = " " + " ".join(tags)
-                line = f"{line}{color(suffix, '7;36', colorize)}"
+                suffix = " " + " ".join((color(t, '7;36', colorize) for t in tags))
+                line = f"{line}{suffix}"
         lines.append(line.rstrip())
     return lines, remaining
 
@@ -588,50 +591,59 @@ def run_squash_commit(args: argparse.Namespace) -> int:
     ensure_clean(repo, allow_dirty=args.allow_dirty)
     repo_root = Path(repo.working_tree_dir).resolve()
 
-    target_path = resolve_subrepo_path(repo, args.path)
-    rel_path = target_path.relative_to(repo_root)
-    gitrepo_path = target_path / ".gitrepo"
-    values = parse_gitrepo_file(gitrepo_path)
-    current_parent = values.get("parent")
-    if not current_parent:
-        raise SquashError(f"No parent entry found in {gitrepo_path}")
-
     target_full = rev_parse(repo_root, args.target)
-    current_parent_full = rev_parse(repo_root, current_parent)
+    updated_any = False
 
-    if target_full == current_parent_full:
-        print(f"Parent is already {current_parent_full} for {rel_path}.")
-        return 0
+    for path in args.paths:
+        target_path = resolve_subrepo_path(repo, path)
+        rel_path = target_path.relative_to(repo_root)
+        gitrepo_path = target_path / ".gitrepo"
+        values = parse_gitrepo_file(gitrepo_path)
+        current_parent = values.get("parent")
+        if not current_parent:
+            raise SquashError(f"No parent entry found in {gitrepo_path}")
 
-    if not is_ancestor(repo_root, target_full, current_parent_full):
-        raise SquashError(
-            f"Target {target_full} is not an ancestor of current parent {current_parent_full}."
+        current_parent_full = rev_parse(repo_root, current_parent)
+
+        if target_full == current_parent_full:
+            print(f"Parent is already {current_parent_full} for {rel_path}.")
+            continue
+
+        if not is_ancestor(repo_root, target_full, current_parent_full):
+            raise SquashError(
+                f"Target {target_full} is not an ancestor of current parent "
+                f"{current_parent_full} for {rel_path}."
+            )
+
+        diff_output = run_git(
+            repo_root,
+            [
+                "diff",
+                "--name-only",
+                f"{target_full}..{current_parent_full}",
+                "--",
+                rel_path.as_posix(),
+            ],
         )
+        changed_files = [line.strip() for line in diff_output.splitlines() if line.strip()]
+        gitrepo_rel = (rel_path / ".gitrepo").as_posix()
+        non_gitrepo_changes = [
+            file_path for file_path in changed_files if file_path != gitrepo_rel
+        ]
+        if non_gitrepo_changes:
+            details = "\n".join(f" - {file_path}" for file_path in non_gitrepo_changes)
+            raise SquashError(
+                "Refusing to squash past modified history. "
+                f"Found changes under {rel_path} between {target_full}..{current_parent_full} "
+                f"outside {gitrepo_rel}:\n{details}"
+            )
 
-    diff_output = run_git(
-        repo_root,
-        [
-            "diff",
-            "--name-only",
-            f"{target_full}..{current_parent_full}",
-            "--",
-            rel_path.as_posix(),
-        ],
-    )
-    changed_files = [line.strip() for line in diff_output.splitlines() if line.strip()]
-    gitrepo_rel = (rel_path / ".gitrepo").as_posix()
-    non_gitrepo_changes = [
-        path for path in changed_files if path != gitrepo_rel
-    ]
-    if non_gitrepo_changes:
-        raise SquashError(
-            "Refusing to squash past modified history. "
-            f"Found changes under {rel_path} between {args.target}..{current_parent} "
-            f"outside {gitrepo_rel}:\n{'\n'.join(map(lambda path: f" - {path}", non_gitrepo_changes))}"
-        )
+        update_gitrepo_parent(gitrepo_path, target_full)
+        print(f"Updated {gitrepo_path} parent to {target_full}.")
+        updated_any = True
 
-    update_gitrepo_parent(gitrepo_path, target_full)
-    print(f"Updated {gitrepo_path} parent to {target_full}.")
+    if not updated_any:
+        print("No subrepo parents updated.")
     return 0
 
 

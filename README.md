@@ -22,7 +22,7 @@ git-subrepo-squash squash path/to/subrepo \
   --head HEAD \
   --output /tmp/subrepo.patch \
   --stat
-git-subrepo-squash squash-commit path/to/subrepo <target-sha>
+git-subrepo-squash squash-commit path/to/subrepo [path/to/other] --target <target-sha>
 ```
 
 Arguments:
@@ -45,7 +45,7 @@ Use `--no-pager` to disable it or `--pager` to force it.
 
 `squash-commit` rewrites the subrepo `.gitrepo` parent to an earlier commit after
 verifying that no non-`.gitrepo` changes occurred under the subrepo path between
-the target commit and the current parent.
+the target commit and the current parent. Multiple subrepo paths may be supplied.
 
 When no changes are found for the selected subrepo path, the command exits
 successfully and prints a notice to stderr (unless `--quiet` is used).
